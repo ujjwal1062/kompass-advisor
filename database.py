@@ -3,10 +3,21 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
+# 1. Try to get it locally (.env)
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+# 2. If not found, try to get it from Streamlit Cloud Secrets
+if not DATABASE_URL:
+    try:
+        import streamlit as st
+        DATABASE_URL = st.secrets.get("DATABASE_URL")
+    except Exception:
+        pass
+
+if not DATABASE_URL:
+    raise ValueError("CRITICAL ERROR: DATABASE_URL is missing! Check your .env or Streamlit Secrets.")
 
 # Create the database engine (Neon requires SSL)
 engine = create_engine(DATABASE_URL)
