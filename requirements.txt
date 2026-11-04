@@ -1,0 +1,12 @@
+streamlit
+openai
+python-dotenv
+sqlalchemy
+psycopg2-binary
+pgvector
+pandas
+openpyxl
+ddgs
+pymupdf
+pytesseract
+pillow

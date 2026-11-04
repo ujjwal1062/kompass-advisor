@@ -1,0 +1,22 @@
+[
+  {
+    "question": "What is the blocked account amount for Indian students?",
+    "expected_keywords": ["11,208", "blocked account", "Sperrkonto", "financial proof"]
+  },
+  {
+    "question": "Can I work part-time while studying in Germany?",
+    "expected_keywords": ["140 full days", "280 half days", "work", "part-time"]
+  },
+  {
+    "question": "I have a BCA degree. Can I do a Master's in AI in Germany?",
+    "expected_keywords": ["BCA", "Master", "AI", "Computer Science", "eligibility"]
+  },
+  {
+    "question": "What are the requirements for a public English-taught Bachelor's in Computer Science?",
+    "expected_keywords": ["English", "Bachelor", "Computer Science", "public", "APS"]
+  },
+  {
+    "question": "What is the deadline for the DAAD EPOS scholarship for the 2027 intake?",
+    "expected_keywords": ["2027", "DAAD", "deadline", "scholarship"]
+  }
+]
