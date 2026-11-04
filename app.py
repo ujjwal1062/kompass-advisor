@@ -13,7 +13,7 @@ import pytesseract
 from PIL import Image
 import io
 
-# Load environment variables
+# Load environment variables (for local testing)
 load_dotenv()
 
 # Cross-platform Tesseract Fix
@@ -22,10 +22,35 @@ if platform.system() == 'Windows':
 else:
     pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 
-client = OpenAI(
-    api_key=os.getenv("LLM_API_KEY"),
-    base_url=os.getenv("LLM_BASE_URL")
-)
+# --- MULTI-KEY ROTATION SETUP ---
+# Check if running on Streamlit Cloud (using secrets) or Locally (using .env)
+if "GROQ_KEY_1" in st.secrets:
+    api_keys = [st.secrets["GROQ_KEY_1"], st.secrets["GROQ_KEY_2"], st.secrets["GROQ_KEY_3"]]
+    db_url = st.secrets["DATABASE_URL"]
+else:
+    api_keys = [os.getenv("GROQ_KEY_1"), os.getenv("GROQ_KEY_2"), os.getenv("GROQ_KEY_3")]
+    db_url = os.getenv("DATABASE_URL")
+
+api_keys = [k for k in api_keys if k] # Remove empty keys
+base_url = "https://api.groq.com/openai/v1"
+
+def get_ai_response(messages, tools=None, stream=False):
+    """Rotates through API keys if one hits a rate limit."""
+    for key in api_keys:
+        try:
+            client = OpenAI(api_key=key, base_url=base_url)
+            kwargs = {"model": "llama-3.3-70b-versatile", "messages": messages}
+            if tools: kwargs["tools"] = tools
+            if stream: kwargs["stream"] = True
+            
+            return client.chat.completions.create(**kwargs)
+        except Exception as e:
+            if "429" in str(e) or "rate limit" in str(e).lower():
+                print("Rate limit hit on key. Rotating to next key...")
+                continue 
+            else:
+                raise e 
+    raise Exception("All API keys have hit their rate limit. Please try again later.")
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Kompass - Germany Study Advisor", page_icon="🧭", layout="wide")
@@ -50,7 +75,8 @@ def execute_search_germany_programs(keyword, degree_level=None, teaching_languag
 
 def execute_search_policies(query):
     db = SessionLocal()
-    q_emb = client.embeddings.create(input=[query], model="auto").data[0].embedding
+    client = OpenAI(api_key=api_keys[0], base_url=base_url)
+    q_emb = client.embeddings.create(input=[query], model="auto").data[0].embedding # Note: Groq may not support embeddings, we might need a fallback here later
     results = db.query(models.PolicyDocument).order_by(models.PolicyDocument.embedding.cosine_distance(q_emb)).limit(3).all()
     extracted_texts = [r.chunk_text for r in results] if results else []
     db.close()
@@ -109,7 +135,7 @@ with st.sidebar:
                 SCHEMA: {{"name": "string", "education": [{{"degree": "string", "institution": "string", "year": "string"}}], "skills": ["string"], "experience": [{{"role": "string", "company": "string", "description": "string"}}]}}
                 CV TEXT: {raw_text[:5000]}"""
                 
-                response = client.chat.completions.create(model="auto", messages=[{"role": "user", "content": prompt}])
+                response = get_ai_response(messages=[{"role": "user", "content": prompt}])
                 json_str = response.choices[0].message.content.replace("```json", "").replace("```", "").strip()
                 
                 try:
@@ -152,7 +178,7 @@ if prompt := st.chat_input("Ask Kompass anything about studying in Germany..."):
 
     with st.chat_message("assistant"):
         try:
-            response = client.chat.completions.create(model="auto", messages=api_messages, tools=tools, tool_choice="auto")
+            response = get_ai_response(messages=api_messages, tools=tools)
             response_message = response.choices[0].message
             
             if response_message.tool_calls:
@@ -174,13 +200,13 @@ if prompt := st.chat_input("Ask Kompass anything about studying in Germany..."):
                     api_messages.append({"tool_call_id": tool_call.id, "role": "tool", "name": function_name, "content": json.dumps(function_response)})
                 
                 status_placeholder.empty()
-                stream = client.chat.completions.create(model="auto", messages=api_messages, stream=True)
+                stream = get_ai_response(messages=api_messages, stream=True)
                 final_text = st.write_stream(stream_generator(stream))
                 
             else:
                 api_messages.pop() 
                 api_messages.append({"role": "user", "content": prompt})
-                stream = client.chat.completions.create(model="auto", messages=api_messages, stream=True)
+                stream = get_ai_response(messages=api_messages, stream=True)
                 final_text = st.write_stream(stream_generator(stream))
             
             st.session_state.messages.append({"role": "assistant", "content": final_text})
