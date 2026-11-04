@@ -23,30 +23,27 @@ else:
     pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 
 # --- MULTI-KEY ROTATION SETUP ---
-# Check if running on Streamlit Cloud (using secrets) or Locally (using .env)
 if "GROQ_KEY_1" in st.secrets:
     api_keys = [st.secrets["GROQ_KEY_1"], st.secrets["GROQ_KEY_2"], st.secrets["GROQ_KEY_3"]]
-    db_url = st.secrets["DATABASE_URL"]
 else:
     api_keys = [os.getenv("GROQ_KEY_1"), os.getenv("GROQ_KEY_2"), os.getenv("GROQ_KEY_3")]
-    db_url = os.getenv("DATABASE_URL")
 
-api_keys = [k for k in api_keys if k] # Remove empty keys
+api_keys = [k for k in api_keys if k] 
 base_url = "https://api.groq.com/openai/v1"
 
 def get_ai_response(messages, tools=None, stream=False):
-    """Rotates through API keys if one hits a rate limit."""
     for key in api_keys:
         try:
             client = OpenAI(api_key=key, base_url=base_url)
-            kwargs = {"model": "llama-3.3-70b-versatile", "messages": messages}
+            # Updated to a valid, active Groq model
+            kwargs = {"model": "llama3-70b-8192", "messages": messages}
             if tools: kwargs["tools"] = tools
             if stream: kwargs["stream"] = True
             
             return client.chat.completions.create(**kwargs)
         except Exception as e:
             if "429" in str(e) or "rate limit" in str(e).lower():
-                print("Rate limit hit on key. Rotating to next key...")
+                print("Rate limit hit on key. Rotating...")
                 continue 
             else:
                 raise e 
@@ -75,12 +72,16 @@ def execute_search_germany_programs(keyword, degree_level=None, teaching_languag
 
 def execute_search_policies(query):
     db = SessionLocal()
-    client = OpenAI(api_key=api_keys[0], base_url=base_url)
-    q_emb = client.embeddings.create(input=[query], model="auto").data[0].embedding # Note: Groq may not support embeddings, we might need a fallback here later
-    results = db.query(models.PolicyDocument).order_by(models.PolicyDocument.embedding.cosine_distance(q_emb)).limit(3).all()
-    extracted_texts = [r.chunk_text for r in results] if results else []
+    try:
+        # Fallback: Since Groq doesn't support embeddings, we use a text-based SQL search
+        results = db.query(models.PolicyDocument).filter(
+            models.PolicyDocument.chunk_text.ilike(f"%{query}%")
+        ).limit(3).all()
+        extracted_texts = [r.chunk_text for r in results] if results else []
+    except Exception as e:
+        extracted_texts = [f"Policy search error: {str(e)}"]
     db.close()
-    return extracted_texts if extracted_texts else "No policies found."
+    return extracted_texts if extracted_texts else "No policies found matching that query."
 
 def execute_web_search(query):
     try:
