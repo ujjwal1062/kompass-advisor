@@ -28,15 +28,16 @@ if "GROQ_KEY_1" in st.secrets:
 else:
     api_keys = [os.getenv("GROQ_KEY_1"), os.getenv("GROQ_KEY_2"), os.getenv("GROQ_KEY_3")]
 
-api_keys = [k for k in api_keys if k] 
+api_keys = [k for k in api_keys if k]
 base_url = "https://api.groq.com/openai/v1"
 
 def get_ai_response(messages, tools=None, stream=False):
+    """Rotates through API keys and uses the official Groq replacement model."""
     for key in api_keys:
         try:
             client = OpenAI(api_key=key, base_url=base_url)
-            # Updated to a valid, active Groq model
-            kwargs = {"model": "llama3-70b-8192", "messages": messages}
+            # ✅ OFFICIAL REPLACEMENT MODEL FOR llama3-70b-8192
+            kwargs = {"model": "llama-3.3-70b-versatile", "messages": messages}
             if tools: kwargs["tools"] = tools
             if stream: kwargs["stream"] = True
             
@@ -44,9 +45,9 @@ def get_ai_response(messages, tools=None, stream=False):
         except Exception as e:
             if "429" in str(e) or "rate limit" in str(e).lower():
                 print("Rate limit hit on key. Rotating...")
-                continue 
+                continue
             else:
-                raise e 
+                raise e
     raise Exception("All API keys have hit their rate limit. Please try again later.")
 
 # --- PAGE CONFIG ---
@@ -73,7 +74,7 @@ def execute_search_germany_programs(keyword, degree_level=None, teaching_languag
 def execute_search_policies(query):
     db = SessionLocal()
     try:
-        # Fallback: Since Groq doesn't support embeddings, we use a text-based SQL search
+        # Safe keyword search (Groq does not support vector embeddings)
         results = db.query(models.PolicyDocument).filter(
             models.PolicyDocument.chunk_text.ilike(f"%{query}%")
         ).limit(3).all()
@@ -205,7 +206,7 @@ if prompt := st.chat_input("Ask Kompass anything about studying in Germany..."):
                 final_text = st.write_stream(stream_generator(stream))
                 
             else:
-                api_messages.pop() 
+                api_messages.pop()
                 api_messages.append({"role": "user", "content": prompt})
                 stream = get_ai_response(messages=api_messages, stream=True)
                 final_text = st.write_stream(stream_generator(stream))
