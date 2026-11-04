@@ -22,7 +22,7 @@ if platform.system() == 'Windows':
 else:
     pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 
-# --- MULTI-KEY ROTATION SETUP ---
+# --- MULTI-KEY & MULTI-MODEL ROTATION SETUP ---
 if "GROQ_KEY_1" in st.secrets:
     api_keys = [st.secrets["GROQ_KEY_1"], st.secrets["GROQ_KEY_2"], st.secrets["GROQ_KEY_3"]]
 else:
@@ -31,24 +31,40 @@ else:
 api_keys = [k for k in api_keys if k]
 base_url = "https://api.groq.com/openai/v1"
 
+# List of active free-tier models (tries in order if one fails)
+FALLBACK_MODELS = [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.8-27b",
+    "gemma2-9b-it",
+    "llama-3.1-8b-instant"
+]
+
 def get_ai_response(messages, tools=None, stream=False):
-    """Rotates through API keys and uses the official Groq replacement model."""
+    """Rotates through API keys and models if one hits a rate limit or is deprecated."""
+    last_error = None
     for key in api_keys:
-        try:
-            client = OpenAI(api_key=key, base_url=base_url)
-            # ✅ OFFICIAL REPLACEMENT MODEL FOR llama3-70b-8192
-            kwargs = {"model": "llama-3.3-70b-versatile", "messages": messages}
-            if tools: kwargs["tools"] = tools
-            if stream: kwargs["stream"] = True
-            
-            return client.chat.completions.create(**kwargs)
-        except Exception as e:
-            if "429" in str(e) or "rate limit" in str(e).lower():
-                print("Rate limit hit on key. Rotating...")
-                continue
-            else:
-                raise e
-    raise Exception("All API keys have hit their rate limit. Please try again later.")
+        for model in FALLBACK_MODELS:
+            try:
+                client = OpenAI(api_key=key, base_url=base_url)
+                kwargs = {"model": model, "messages": messages}
+                if tools: kwargs["tools"] = tools
+                if stream: kwargs["stream"] = True
+                
+                response = client.chat.completions.create(**kwargs)
+                return response # Success!
+                
+            except Exception as e:
+                error_str = str(e).lower()
+                last_error = e
+                # If rate limited (429) or model not found (404), try next model/key
+                if "429" in error_str or "rate limit" in error_str or "404" in error_str or "not found" in error_str or "does not exist" in error_str:
+                    print(f"Model {model} failed with key. Trying next...")
+                    continue 
+                else:
+                    raise e # Real error (auth, etc.)
+    
+    raise Exception(f"All models and keys failed. Last error: {last_error}")
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Kompass - Germany Study Advisor", page_icon="🧭", layout="wide")
