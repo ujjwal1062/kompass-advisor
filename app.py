@@ -13,7 +13,7 @@ import pytesseract
 from PIL import Image
 import io
 
-# Load environment variables (for local testing)
+# Load environment variables
 load_dotenv()
 
 # Cross-platform Tesseract Fix
@@ -39,38 +39,26 @@ FALLBACK_MODELS = [
 ]
 
 def get_ai_response(messages, tools=None, stream=False):
-    """Rotates through API keys and models with proper extra_body handling."""
     last_error = None
     for key in api_keys:
         for model in FALLBACK_MODELS:
             try:
                 client = OpenAI(api_key=key, base_url=base_url)
                 kwargs = {"model": model, "messages": messages}
-                
-                if tools: 
-                    kwargs["tools"] = tools
-                
+                if tools: kwargs["tools"] = tools
                 if stream: 
                     kwargs["stream"] = True
-                    kwargs["max_completion_tokens"] = 400
-                    # ✅ FIX: Pass Groq-specific parameter inside extra_body
-                    kwargs["extra_body"] = {
-                        "disable_tool_validation": True,
-                        "tool_choice": "none"
-                    }
+                    kwargs["extra_body"] = {"disable_tool_validation": True, "tool_choice": "none"}
                 
-                response = client.chat.completions.create(**kwargs)
-                return response 
-                
+                return client.chat.completions.create(**kwargs)
             except Exception as e:
                 error_str = str(e).lower()
                 last_error = e
-                if "429" in error_str or "rate limit" in error_str or "404" in error_str or "not found" in error_str or "does not exist" in error_str:
+                if any(err in error_str for err in ["429", "rate limit", "404", "not found", "does not exist"]):
                     continue 
                 else:
                     raise e 
-    
-    raise Exception(f"All models and keys failed. Last error: {last_error}")
+    raise Exception(f"All models failed. Last error: {last_error}")
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Kompass - Germany Study Advisor", page_icon="🧭", layout="wide")
@@ -111,15 +99,13 @@ def execute_web_search(query):
         return [f"Title: {r.get('title')}\nSource: {r.get('href')}\nSnippet: {r.get('body')}" for r in results] if results else "No internet results."
     except Exception as e: return f"Web search failed: {e}"
 
-def execute_get_student_profile():
+def get_latest_student_profile():
     db = SessionLocal()
     profile = db.query(models.StudentProfile).order_by(models.StudentProfile.id.desc()).first()
-    if profile:
-        profile_data = f"Student Name: {profile.name}\nProfile Data: {profile.profile_json}"
-        db.close()
-        return profile_data
     db.close()
-    return "No student profile found."
+    if profile:
+        return f"Student Name: {profile.name}\nProfile Data: {profile.profile_json}"
+    return None
 
 # --- TOOLS DEFINITION ---
 tools = [
@@ -137,27 +123,15 @@ def stream_generator(response):
 # --- SIDEBAR: CV UPLOAD ---
 with st.sidebar:
     st.header("📄 Upload Your CV")
-    st.markdown("Upload your resume to get personalized advice.")
     uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
-    
     if uploaded_file is not None:
         if st.button("Process CV"):
-            with st.spinner("Reading and structuring CV..."):
+            with st.spinner("Structuring CV..."):
                 doc = pymupdf.open(stream=uploaded_file.read(), filetype="pdf")
-                raw_text = ""
-                for page in doc:
-                    page_text = page.get_text()
-                    if not page_text.strip():
-                        pix = page.get_pixmap()
-                        img = Image.open(io.BytesIO(pix.tobytes("png")))
-                        page_text = pytesseract.image_to_string(img)
-                    raw_text += page_text + "\n"
+                raw_text = "".join([page.get_text() for page in doc])
                 doc.close()
                 
-                prompt = f"""Extract the CV information into this exact JSON schema. Do not invent facts.
-                SCHEMA: {{"name": "string", "education": [{{"degree": "string", "institution": "string", "year": "string"}}], "skills": ["string"], "experience": [{{"role": "string", "company": "string", "description": "string"}}]}}
-                CV TEXT: {raw_text[:5000]}"""
-                
+                prompt = f"""Extract the CV information into JSON: {{"name": "string", "education": [{{"degree": "string", "institution": "string", "year": "string"}}], "skills": ["string"], "experience": [{{"role": "string", "company": "string", "description": "string"}}]}} \n CV TEXT: {raw_text[:5000]}"""
                 response = get_ai_response(messages=[{"role": "user", "content": prompt}])
                 json_str = response.choices[0].message.content.replace("```json", "").replace("```", "").strip()
                 
@@ -165,44 +139,48 @@ with st.sidebar:
                     profile_data = json.loads(json_str)
                     name = profile_data.get("name", "Unknown")
                     db = SessionLocal()
-                    new_profile = models.StudentProfile(name=name, profile_json=json_str)
-                    db.add(new_profile)
+                    db.add(models.StudentProfile(name=name, profile_json=json_str))
                     db.commit()
                     db.close()
-                    st.success(f"✅ Successfully saved profile for {name}!")
+                    st.success(f"✅ Saved profile for {name}!")
+                    st.rerun() # Refresh to load the new profile into memory
                 except Exception as e:
-                    st.error(f"Error saving to DB: {e}")
+                    st.error(f"Error: {e}")
 
 # --- MAIN CHAT INTERFACE ---
 if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "assistant", "content": "Hello! I'm Kompass, your Germany study advisor. Upload your CV on the left, or ask me any questions about studying in Germany!"}]
+    st.session_state.messages = [{"role": "assistant", "content": "Hello! I'm Kompass. Upload your CV on the left, or tell me about your background, and let's find your perfect Master's program in Germany."}]
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if prompt := st.chat_input("Ask Kompass anything about studying in Germany..."):
+if prompt := st.chat_input("Ask Kompass anything..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    system_prompt = """You are Kompass, an expert Germany study advisor. 
-    Use your tools to find programs or policies if needed. 
-    Personalize based on the student profile if available.
-    CRITICAL: Be conversational and direct. Match the length of the user's message. If they say "hi", reply with a short greeting. Do not write massive essays unless explicitly asked for a detailed roadmap. Keep responses under 150 words unless the user asks for a step-by-step guide."""
+    # 1. ALWAYS FETCH THE PROFILE (Discourse Integration)
+    profile_data = get_latest_student_profile()
+    profile_context = f"\n\n[SYSTEM NOTE: This is the student's actual profile. NEVER ask them for their CV or background again. Use this data to personalize your answer: \n{profile_data}]" if profile_data else ""
+
+    # 2. THE ULTIMATE COUNSELOR PROMPT
+    system_prompt = f"""You are Kompass, an expert and friendly Germany study advisor. 
+    You are speaking directly to a student. Talk like a human mentor, not a robotic search engine.
+    {profile_context}
+    
+    RULES:
+    1. If the student has a profile (provided above), acknowledge their specific background (e.g., BCA, Python, specific marks) when recommending programs. Explain WHY a program fits them.
+    2. Use your tools to search for programs or policies. 
+    3. Be dynamic in your length. If they say "hi", reply with a short greeting. If they ask for a roadmap, give a detailed, step-by-step guide.
+    4. Never output raw tables or JSON to the user. Translate the data into conversational advice.
+    5. NEVER ask the student for a CV if their profile is already provided above.
+    """
 
     api_messages = [{"role": "system", "content": system_prompt}]
     
-    profile_context = ""
-    if any(word in prompt.lower() for word in ["cv", "profile", "resume", "my skills"]):
-        profile_data = execute_get_student_profile()
-        profile_context = f"\n[SYSTEM NOTE: User Profile: {profile_data}]"
-
     for msg in st.session_state.messages:
-        if msg["role"] == "user" and msg["content"] == prompt:
-            api_messages.append({"role": "user", "content": prompt + profile_context})
-        else:
-            api_messages.append({"role": msg["role"], "content": msg["content"]})
+        api_messages.append({"role": msg["role"], "content": msg["content"]})
 
     with st.chat_message("assistant"):
         try:
@@ -211,7 +189,7 @@ if prompt := st.chat_input("Ask Kompass anything about studying in Germany..."):
             
             if response_message.tool_calls:
                 status_placeholder = st.empty()
-                status_placeholder.caption("🔍 Searching databases...")
+                status_placeholder.caption("🔍 Analyzing database for your profile...")
                 
                 api_messages.append(response_message)
                 for tool_call in response_message.tool_calls:
@@ -228,6 +206,8 @@ if prompt := st.chat_input("Ask Kompass anything about studying in Germany..."):
                     api_messages.append({"tool_call_id": tool_call.id, "role": "tool", "name": function_name, "content": json.dumps(function_response)})
                 
                 status_placeholder.empty()
+                
+                # Stream the final answer
                 stream = get_ai_response(messages=api_messages, stream=True)
                 final_text = st.write_stream(stream_generator(stream))
                 
