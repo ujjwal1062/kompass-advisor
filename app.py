@@ -2,6 +2,7 @@ import streamlit as st
 import os
 import json
 import platform
+import re
 from openai import OpenAI
 from dotenv import load_dotenv
 from sqlalchemy import or_
@@ -39,6 +40,7 @@ FALLBACK_MODELS = [
 ]
 
 def get_ai_response(messages, tools=None, stream=False):
+    """Rotates through keys/models. Removed the buggy extra_body parameter."""
     last_error = None
     for key in api_keys:
         for model in FALLBACK_MODELS:
@@ -46,9 +48,7 @@ def get_ai_response(messages, tools=None, stream=False):
                 client = OpenAI(api_key=key, base_url=base_url)
                 kwargs = {"model": model, "messages": messages}
                 if tools: kwargs["tools"] = tools
-                if stream: 
-                    kwargs["stream"] = True
-                    kwargs["extra_body"] = {"disable_tool_validation": True, "tool_choice": "none"}
+                if stream: kwargs["stream"] = True
                 
                 return client.chat.completions.create(**kwargs)
             except Exception as e:
@@ -143,13 +143,13 @@ with st.sidebar:
                     db.commit()
                     db.close()
                     st.success(f"✅ Saved profile for {name}!")
-                    st.rerun() # Refresh to load the new profile into memory
+                    st.rerun() 
                 except Exception as e:
                     st.error(f"Error: {e}")
 
 # --- MAIN CHAT INTERFACE ---
 if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "assistant", "content": "Hello! I'm Kompass. Upload your CV on the left, or tell me about your background, and let's find your perfect Master's program in Germany."}]
+    st.session_state.messages = [{"role": "assistant", "content": "Hello! I'm Kompass. Upload your CV on the left, or tell me about your background, and let's find your perfect path to Germany."}]
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
@@ -160,21 +160,20 @@ if prompt := st.chat_input("Ask Kompass anything..."):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # 1. ALWAYS FETCH THE PROFILE (Discourse Integration)
+    # 1. ALWAYS FETCH THE PROFILE
     profile_data = get_latest_student_profile()
-    profile_context = f"\n\n[SYSTEM NOTE: This is the student's actual profile. NEVER ask them for their CV or background again. Use this data to personalize your answer: \n{profile_data}]" if profile_data else ""
+    profile_context = f"\n\n[STUDENT PROFILE ON FILE: \n{profile_data}]" if profile_data else "\n\n[No CV uploaded yet.]"
 
-    # 2. THE ULTIMATE COUNSELOR PROMPT
+    # 2. THE ADAPTIVE COUNSELOR PROMPT
     system_prompt = f"""You are Kompass, an expert and friendly Germany study advisor. 
-    You are speaking directly to a student. Talk like a human mentor, not a robotic search engine.
+    You are speaking directly to a student. Talk like a human mentor, not a search engine.
     {profile_context}
     
     RULES:
-    1. If the student has a profile (provided above), acknowledge their specific background (e.g., BCA, Python, specific marks) when recommending programs. Explain WHY a program fits them.
-    2. Use your tools to search for programs or policies. 
-    3. Be dynamic in your length. If they say "hi", reply with a short greeting. If they ask for a roadmap, give a detailed, step-by-step guide.
-    4. Never output raw tables or JSON to the user. Translate the data into conversational advice.
-    5. NEVER ask the student for a CV if their profile is already provided above.
+    1. ADAPT TO THE USER: If they are in 11th grade (like CBSE PCM), talk to them about Bachelor's degrees, Studienkolleg, or APS. DO NOT give them Master's advice. If they have a BCA/Bachelor's, talk to them about Master's programs. Use the profile if provided.
+    2. PERSONALIZE: If they have a profile, explicitly acknowledge their background (e.g., "Since you have a BCA with Python skills...").
+    3. BE CONVERSATIONAL: Never output raw tables or JSON to the user. Translate data into friendly, readable advice.
+    4. BE CONCISE: Match the length of the user's message. If they say "hi", reply with a short greeting. Give detailed roadmaps only when asked.
     """
 
     api_messages = [{"role": "system", "content": system_prompt}]
@@ -184,12 +183,13 @@ if prompt := st.chat_input("Ask Kompass anything..."):
 
     with st.chat_message("assistant"):
         try:
+            # STEP 1: Check if tools are needed
             response = get_ai_response(messages=api_messages, tools=tools)
             response_message = response.choices[0].message
             
             if response_message.tool_calls:
                 status_placeholder = st.empty()
-                status_placeholder.caption("🔍 Analyzing database for your profile...")
+                status_placeholder.caption("🔍 Analyzing database...")
                 
                 api_messages.append(response_message)
                 for tool_call in response_message.tool_calls:
@@ -207,15 +207,17 @@ if prompt := st.chat_input("Ask Kompass anything..."):
                 
                 status_placeholder.empty()
                 
-                # Stream the final answer
+                # STEP 2: Stream the final answer (NO tools passed here to prevent crashes)
                 stream = get_ai_response(messages=api_messages, stream=True)
                 final_text = st.write_stream(stream_generator(stream))
                 
             else:
-                api_messages.pop()
-                api_messages.append({"role": "user", "content": prompt})
+                # If no tools needed, just stream the chat
                 stream = get_ai_response(messages=api_messages, stream=True)
                 final_text = st.write_stream(stream_generator(stream))
+            
+            # Clean up any accidental XML tags the model might have hallucinated
+            final_text = re.sub(r'<[^>]+>', '', str(final_text)).strip()
             
             st.session_state.messages.append({"role": "assistant", "content": final_text})
             
