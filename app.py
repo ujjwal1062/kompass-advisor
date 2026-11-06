@@ -31,7 +31,6 @@ else:
 api_keys = [k for k in api_keys if k]
 base_url = "https://api.groq.com/openai/v1"
 
-# Active Groq models with tool-calling support
 FALLBACK_MODELS = [
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
@@ -40,20 +39,25 @@ FALLBACK_MODELS = [
 ]
 
 def get_ai_response(messages, tools=None, stream=False):
-    """Rotates through API keys and models."""
+    """Rotates through API keys and models with proper extra_body handling."""
     last_error = None
     for key in api_keys:
         for model in FALLBACK_MODELS:
             try:
                 client = OpenAI(api_key=key, base_url=base_url)
                 kwargs = {"model": model, "messages": messages}
-                if tools: kwargs["tools"] = tools
+                
+                if tools: 
+                    kwargs["tools"] = tools
+                
                 if stream: 
                     kwargs["stream"] = True
-                    # THE FIX: Disable strict validation on stream. If the model hallucinates a tool call, Groq will ignore it instead of crashing.
-                    kwargs["disable_tool_validation"] = True
-                    # THE FIX: Hard limit on response length to save tokens
-                    kwargs["max_completion_tokens"] = 400 
+                    kwargs["max_completion_tokens"] = 400
+                    # ✅ FIX: Pass Groq-specific parameter inside extra_body
+                    kwargs["extra_body"] = {
+                        "disable_tool_validation": True,
+                        "tool_choice": "none"
+                    }
                 
                 response = client.chat.completions.create(**kwargs)
                 return response 
@@ -182,7 +186,6 @@ if prompt := st.chat_input("Ask Kompass anything about studying in Germany..."):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # THE FIX: Added brevity instructions to the system prompt
     system_prompt = """You are Kompass, an expert Germany study advisor. 
     Use your tools to find programs or policies if needed. 
     Personalize based on the student profile if available.
