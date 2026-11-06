@@ -31,17 +31,16 @@ else:
 api_keys = [k for k in api_keys if k]
 base_url = "https://api.groq.com/openai/v1"
 
-# List of active free-tier models (tries in order if one fails)
+# Active Groq models with tool-calling support
 FALLBACK_MODELS = [
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
     "qwen/qwen3.8-27b",
-    "gemma2-9b-it",
     "llama-3.1-8b-instant"
 ]
 
 def get_ai_response(messages, tools=None, stream=False):
-    """Rotates through API keys and models if one hits a rate limit or is deprecated."""
+    """Rotates through API keys and models."""
     last_error = None
     for key in api_keys:
         for model in FALLBACK_MODELS:
@@ -49,20 +48,23 @@ def get_ai_response(messages, tools=None, stream=False):
                 client = OpenAI(api_key=key, base_url=base_url)
                 kwargs = {"model": model, "messages": messages}
                 if tools: kwargs["tools"] = tools
-                if stream: kwargs["stream"] = True
+                if stream: 
+                    kwargs["stream"] = True
+                    # THE FIX: Disable strict validation on stream. If the model hallucinates a tool call, Groq will ignore it instead of crashing.
+                    kwargs["disable_tool_validation"] = True
+                    # THE FIX: Hard limit on response length to save tokens
+                    kwargs["max_completion_tokens"] = 400 
                 
                 response = client.chat.completions.create(**kwargs)
-                return response # Success!
+                return response 
                 
             except Exception as e:
                 error_str = str(e).lower()
                 last_error = e
-                # If rate limited (429) or model not found (404), try next model/key
                 if "429" in error_str or "rate limit" in error_str or "404" in error_str or "not found" in error_str or "does not exist" in error_str:
-                    print(f"Model {model} failed with key. Trying next...")
                     continue 
                 else:
-                    raise e # Real error (auth, etc.)
+                    raise e 
     
     raise Exception(f"All models and keys failed. Last error: {last_error}")
 
@@ -90,7 +92,6 @@ def execute_search_germany_programs(keyword, degree_level=None, teaching_languag
 def execute_search_policies(query):
     db = SessionLocal()
     try:
-        # Safe keyword search (Groq does not support vector embeddings)
         results = db.query(models.PolicyDocument).filter(
             models.PolicyDocument.chunk_text.ilike(f"%{query}%")
         ).limit(3).all()
@@ -181,7 +182,13 @@ if prompt := st.chat_input("Ask Kompass anything about studying in Germany..."):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    api_messages = [{"role": "system", "content": "You are Kompass, an expert Germany study advisor. Use your tools. Personalize based on the student profile if available."}]
+    # THE FIX: Added brevity instructions to the system prompt
+    system_prompt = """You are Kompass, an expert Germany study advisor. 
+    Use your tools to find programs or policies if needed. 
+    Personalize based on the student profile if available.
+    CRITICAL: Be conversational and direct. Match the length of the user's message. If they say "hi", reply with a short greeting. Do not write massive essays unless explicitly asked for a detailed roadmap. Keep responses under 150 words unless the user asks for a step-by-step guide."""
+
+    api_messages = [{"role": "system", "content": system_prompt}]
     
     profile_context = ""
     if any(word in prompt.lower() for word in ["cv", "profile", "resume", "my skills"]):
