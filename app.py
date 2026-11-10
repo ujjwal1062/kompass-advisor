@@ -89,7 +89,6 @@ def execute_search_germany_programs(keyword, degree_level=None, teaching_languag
     return formatted if formatted else "0 results found. Use search_internet."
 
 def execute_match_scholarships(nationality="India", degree_level="Master"):
-    """Dedicated tool to filter scholarships by nationality and degree level."""
     db = SessionLocal()
     query = db.query(models.PolicyDocument).filter(
         models.PolicyDocument.topic == "Scholarships",
@@ -236,11 +235,29 @@ if prompt := st.chat_input("Ask Kompass anything..."):
                 for m in st.session_state.messages[:-1]: clean_messages.append({"role": m["role"], "content": m["content"]})
                 clean_messages.append({"role": "user", "content": f"{prompt}\n\n[SYSTEM DATA FROM SEARCH]:\n" + "\n".join(tool_text_results) + "\n\nNow, answer."})
                 
-                stream = get_ai_response(messages=clean_messages, stream=True)
-                final_text = st.write_stream(stream_generator(stream))
+                # THE BULLETPROOF FIX: Try streaming, catch the Groq hallucination error, and fallback to non-streaming.
+                try:
+                    stream = get_ai_response(messages=clean_messages, stream=True)
+                    final_text = st.write_stream(stream_generator(stream))
+                except Exception as stream_error:
+                    if "Tool choice" in str(stream_error) or "tool" in str(stream_error).lower():
+                        # Fallback to non-streaming if Groq hallucinates a tool call
+                        final_response = get_ai_response(messages=clean_messages, stream=False)
+                        final_text = final_response.choices[0].message.content
+                        st.write(final_text)
+                    else:
+                        raise stream_error
             else:
-                stream = get_ai_response(messages=api_messages, stream=True)
-                final_text = st.write_stream(stream_generator(stream))
+                try:
+                    stream = get_ai_response(messages=api_messages, stream=True)
+                    final_text = st.write_stream(stream_generator(stream))
+                except Exception as stream_error:
+                    if "Tool choice" in str(stream_error) or "tool" in str(stream_error).lower():
+                        final_response = get_ai_response(messages=api_messages, stream=False)
+                        final_text = final_response.choices[0].message.content
+                        st.write(final_text)
+                    else:
+                        raise stream_error
             
             final_text = str(final_text).replace("<br>", "\n").replace("<br/>", "\n").replace("<p>", "").replace("</p>", "\n")
             final_text = re.sub(r'\$\$(.*?)\$\$', r'\1', final_text)
