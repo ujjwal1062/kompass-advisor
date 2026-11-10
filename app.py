@@ -45,9 +45,7 @@ def get_ai_response(messages, tools=None, stream=False):
             except Exception as e:
                 error_str = str(e).lower()
                 last_error = e
-                # THE FIX: Add tool hallucination errors to the rotation list
                 if any(err in error_str for err in ["429", "rate limit", "404", "not found", "tool choice", "called a tool"]):
-                    print(f"Model {model} hallucinated a tool call or hit rate limit. Rotating...")
                     continue 
                 else:
                     raise e 
@@ -113,10 +111,24 @@ def execute_match_scholarships(nationality="India", degree_level="Master"):
 
 def execute_check_anabin(university_name):
     db = SessionLocal()
-    results = db.query(models.IndianUniversity).filter(models.IndianUniversity.name.ilike(f"%{university_name}%")).limit(3).all()
-    formatted = [{"university": r.name, "status": r.h_plus_status, "city": r.city} for r in results]
+    words = university_name.lower().split()
+    search_conditions = []
+    for word in words:
+        if len(word) > 3: 
+            search_conditions.append(models.IndianUniversity.name.ilike(f"%{word}%"))
+            
+    results = db.query(models.IndianUniversity).filter(or_(*search_conditions)).limit(3).all()
+    formatted = [{"university": r.name, "status": r.h_plus_status} for r in results]
     db.close()
-    return formatted if formatted else "0 results found. Could not find this Indian university in the Anabin registry."
+    
+    if not formatted:
+        return "0 results found in the LOCAL Anabin database. You MUST use `search_internet` to check the official Anabin portal."
+    
+    status = formatted[0]['status'].lower()
+    if status in ['not_checked', 'not found', 'error']:
+        return f"Found in local registry, but the status is '{status}'. WARNING: Our local dataset has NOT verified this university yet. You MUST use `search_internet` to check the official Anabin portal."
+        
+    return formatted
 
 def execute_search_knowledge_base(query):
     db = SessionLocal()
@@ -130,7 +142,7 @@ def execute_search_knowledge_base(query):
 
 def execute_web_search(query):
     try:
-        results = DDGS().text(query + " Germany study abroad", max_results=4)
+        results = DDGS().text(query + " Anabin Germany recognition", max_results=4)
         return [f"Title: {r.get('title')}\nSource: {r.get('href')}\nSnippet: {r.get('body')}" for r in results] if results else "No internet results found."
     except Exception as e: return f"Web search failed: {e}"
 
@@ -146,7 +158,7 @@ tools = [
     {"type": "function", "function": {"name": "match_scholarships", "description": "Find scholarships filtered by nationality and degree level.", "parameters": {"type": "object", "properties": {"nationality": {"type": ["string", "null"]}, "degree_level": {"type": ["string", "null"]}}, "required": []}}},
     {"type": "function", "function": {"name": "check_anabin_status", "description": "Check the H+ recognition status of an Indian university.", "parameters": {"type": "object", "properties": {"university_name": {"type": "string"}}, "required": ["university_name"]}}},
     {"type": "function", "function": {"name": "search_knowledge_base", "description": "Search local DB for visas, APS, finance, AND industry/careers.", "parameters": {"type": "object", "properties": {"query": {"type": ["string", "null"]}}, "required": ["query"]}}},
-    {"type": "function", "function": {"name": "search_internet", "description": "Use ONLY if the local DB returns 0 results.", "parameters": {"type": "object", "properties": {"query": {"type": ["string", "null"]}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "search_internet", "description": "Use ONLY if the local DB returns 0 results or if Anabin status is 'not_checked'.", "parameters": {"type": "object", "properties": {"query": {"type": ["string", "null"]}}, "required": ["query"]}}},
     {"type": "function", "function": {"name": "calculate_german_grade", "description": "Convert CGPA to German grade.", "parameters": {"type": "object", "properties": {"cgpa": {"type": "number"}}, "required": ["cgpa"]}}}
 ]
 
@@ -202,10 +214,11 @@ if prompt := st.chat_input("Ask Kompass anything..."):
     {VERIFIED_FACTS}
     
     *** RULES ***
-    1. SCHOLARSHIPS: Use `match_scholarships` if asked about scholarships.
-    2. ANABIN: Use `check_anabin_status` if asked about Indian university recognition.
+    1. ANABIN: Use `check_anabin_status`. 
+       - CRITICAL RULE: If the tool returns "0 results found" OR it returns a status of "not_checked", you must IMMEDIATELY use `search_internet` to check the live Anabin portal. Do not tell the user it is unrecognized until you have checked the internet.
+    2. SCHOLARSHIPS: Use `match_scholarships` if asked about scholarships.
     3. INDUSTRY/CAREERS: Use `search_knowledge_base` for jobs/companies.
-    4. LOCAL DATA FIRST. Only use `search_internet` if the local DB returns "0 results found".
+    4. LOCAL DATA FIRST. Only use `search_internet` if the local DB fails.
     5. NO HTML/LATEX. Use pure Markdown.
     6. Be a mentor, talk like a human.
     """

@@ -1,5 +1,4 @@
 import os
-import glob
 import pandas as pd
 from database import SessionLocal, engine
 import models
@@ -7,36 +6,35 @@ import models
 # Ensure new tables are created
 models.Base.metadata.create_all(bind=engine)
 
-# Path to your Indian university dataset
-FOLDER_PATH = r"D:\dont delete ujjwal\dataset\indian_university_dataset\Indian_University_Registry_Package\data"
+# Path to the NEW, scraped CSV
+CSV_PATH = "anabin_official_india.csv"
 
 def ingest_anabin():
-    search_pattern = os.path.join(FOLDER_PATH, "*.csv")
-    files = glob.glob(search_pattern)
-    
-    if not files:
-        print(f"❌ Error: Could not find any CSV files in {FOLDER_PATH}")
+    if not os.path.exists(CSV_PATH):
+        print(f"❌ Error: {CSV_PATH} not found. Please run scrape_anabin.py first.")
         return
 
-    target_file = files[0]
-    print(f"✅ Found file: {target_file}")
-    
+    print(f"✅ Found file: {CSV_PATH}")
     db = SessionLocal()
     try:
-        df = pd.read_csv(target_file)
-        print(f"Loaded {len(df)} rows. Inserting into SQL...")
+        df = pd.read_csv(CSV_PATH)
+        
+        # Wipe old data to prevent duplicates
+        db.query(models.IndianUniversity).delete()
+        db.commit()
+        print("Cleared old Anabin data. Loading fresh, accurate data...")
         
         count = 0
         for index, row in df.iterrows():
-            # Using .get() with multiple fallbacks to handle different column naming conventions
-            name = row.get('University Name') or row.get('institution_name') or row.get('Name') or row.get('institution')
+            name = row.get('institution_name')
+            status = row.get('official_anabin_status')
             if not name or pd.isna(name): continue
             
             uni = models.IndianUniversity(
                 name=str(name).strip(),
-                h_plus_status=str(row.get('H+ Status') or row.get('status') or row.get('H+') or 'Not listed').strip(),
-                city=str(row.get('City') or row.get('city') or '').strip(),
-                state=str(row.get('State') or row.get('state') or '').strip()
+                h_plus_status=str(status).strip(),
+                city="", # We don't have city data from the scrape
+                state=""
             )
             db.add(uni)
             count += 1
