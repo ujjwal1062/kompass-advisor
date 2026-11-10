@@ -43,8 +43,14 @@ def get_ai_response(messages, tools=None, stream=False):
                 if stream: kwargs["stream"] = True
                 return client.chat.completions.create(**kwargs)
             except Exception as e:
-                if any(err in str(e).lower() for err in ["429", "rate limit", "404", "not found"]): continue 
-                else: raise e 
+                error_str = str(e).lower()
+                last_error = e
+                # THE FIX: Add tool hallucination errors to the rotation list
+                if any(err in error_str for err in ["429", "rate limit", "404", "not found", "tool choice", "called a tool"]):
+                    print(f"Model {model} hallucinated a tool call or hit rate limit. Rotating...")
+                    continue 
+                else:
+                    raise e 
     raise Exception(f"All models failed. Last error: {last_error}")
 
 # --- PAGE CONFIG ---
@@ -196,8 +202,8 @@ if prompt := st.chat_input("Ask Kompass anything..."):
     {VERIFIED_FACTS}
     
     *** RULES ***
-    1. SCHOLARSHIPS: If the user asks about scholarships, you MUST use the `match_scholarships` tool. Analyze the returned criteria (CGPA, deadlines, etc.) against the student's profile to see if they are eligible.
-    2. ANABIN: If the user asks if their Indian university is recognized, you MUST use the `check_anabin_status` tool. DO NOT guess.
+    1. SCHOLARSHIPS: Use `match_scholarships` if asked about scholarships.
+    2. ANABIN: Use `check_anabin_status` if asked about Indian university recognition.
     3. INDUSTRY/CAREERS: Use `search_knowledge_base` for jobs/companies.
     4. LOCAL DATA FIRST. Only use `search_internet` if the local DB returns "0 results found".
     5. NO HTML/LATEX. Use pure Markdown.
@@ -235,29 +241,11 @@ if prompt := st.chat_input("Ask Kompass anything..."):
                 for m in st.session_state.messages[:-1]: clean_messages.append({"role": m["role"], "content": m["content"]})
                 clean_messages.append({"role": "user", "content": f"{prompt}\n\n[SYSTEM DATA FROM SEARCH]:\n" + "\n".join(tool_text_results) + "\n\nNow, answer."})
                 
-                # THE BULLETPROOF FIX: Try streaming, catch the Groq hallucination error, and fallback to non-streaming.
-                try:
-                    stream = get_ai_response(messages=clean_messages, stream=True)
-                    final_text = st.write_stream(stream_generator(stream))
-                except Exception as stream_error:
-                    if "Tool choice" in str(stream_error) or "tool" in str(stream_error).lower():
-                        # Fallback to non-streaming if Groq hallucinates a tool call
-                        final_response = get_ai_response(messages=clean_messages, stream=False)
-                        final_text = final_response.choices[0].message.content
-                        st.write(final_text)
-                    else:
-                        raise stream_error
+                stream = get_ai_response(messages=clean_messages, stream=True)
+                final_text = st.write_stream(stream_generator(stream))
             else:
-                try:
-                    stream = get_ai_response(messages=api_messages, stream=True)
-                    final_text = st.write_stream(stream_generator(stream))
-                except Exception as stream_error:
-                    if "Tool choice" in str(stream_error) or "tool" in str(stream_error).lower():
-                        final_response = get_ai_response(messages=api_messages, stream=False)
-                        final_text = final_response.choices[0].message.content
-                        st.write(final_text)
-                    else:
-                        raise stream_error
+                stream = get_ai_response(messages=api_messages, stream=True)
+                final_text = st.write_stream(stream_generator(stream))
             
             final_text = str(final_text).replace("<br>", "\n").replace("<br/>", "\n").replace("<p>", "").replace("</p>", "\n")
             final_text = re.sub(r'\$\$(.*?)\$\$', r'\1', final_text)
