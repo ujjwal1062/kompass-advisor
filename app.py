@@ -40,7 +40,7 @@ FALLBACK_MODELS = [
 ]
 
 def get_ai_response(messages, tools=None, stream=False):
-    """Rotates through keys/models. Only passes tools if requested."""
+    """Rotates through keys/models. If streaming, tools are ALWAYS stripped."""
     last_error = None
     for key in api_keys:
         for model in FALLBACK_MODELS:
@@ -48,8 +48,7 @@ def get_ai_response(messages, tools=None, stream=False):
                 client = OpenAI(api_key=key, base_url=base_url)
                 kwargs = {"model": model, "messages": messages}
                 
-                # ✅ FIX: Only pass tools if we are NOT streaming.
-                # This prevents the model from hallucinating a tool call during the final text generation.
+                # CRITICAL: Only pass tools if we are NOT streaming.
                 if tools and not stream: 
                     kwargs["tools"] = tools
                 
@@ -71,7 +70,7 @@ st.set_page_config(page_title="Kompass - Germany Study Advisor", page_icon="🧭
 st.title("🧭 Kompass - Germany Study Advisor")
 st.markdown("Your personal AI counselor for studying in Germany.")
 
-# --- BACKEND FUNCTIONS (Same as before) ---
+# --- BACKEND FUNCTIONS ---
 def execute_search_germany_programs(keyword, degree_level=None, teaching_language=None, is_public=None):
     db = SessionLocal()
     query = db.query(models.Program).join(models.University)
@@ -116,7 +115,7 @@ def stream_generator(response):
         if chunk.choices and chunk.choices[0].delta.content:
             yield chunk.choices[0].delta.content
 
-# --- SIDEBAR: CV UPLOAD (PRIVACY FIX) ---
+# --- SIDEBAR: CV UPLOAD ---
 with st.sidebar:
     st.header("📄 Upload Your CV")
     uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
@@ -157,17 +156,17 @@ if prompt := st.chat_input("Ask Kompass anything..."):
         st.markdown(prompt)
 
     profile_data = st.session_state.get("user_profile")
-    profile_context = f"\n\n[STUDENT PROFILE ON FILE: \n{profile_data}]" if profile_data else "\n\n[No CV uploaded yet. DO NOT assume you know the user's name or background. Ask them to introduce themselves.]"
+    profile_context = f"\n\n[STUDENT PROFILE ON FILE: \n{profile_data}]" if profile_data else "\n\n[No CV uploaded yet. DO NOT assume you know the user's name or background.]"
 
     system_prompt = f"""You are Kompass, an expert and friendly Germany study advisor. 
     You are speaking directly to a student. Talk like a human mentor, not a search engine.
     {profile_context}
     
     RULES:
-    1. ADAPT TO THE USER: If they are in 11th grade (like CBSE PCM), talk to them about Bachelor's degrees, Studienkolleg, or APS. DO NOT give them Master's advice. If they have a BCA/Bachelor's, talk to them about Master's programs. Use the profile if provided.
-    2. PERSONALIZE: If they have a profile, explicitly acknowledge their background (e.g., "Since you have a BCA with Python skills..."). If NO profile is provided, DO NOT guess their name or background.
-    3. BE CONVERSATIONAL: Never output raw tables or JSON to the user. Translate data into friendly, readable advice.
-    4. BE CONCISE: Match the length of the user's message. If they say "hi", reply with a short greeting. Give detailed roadmaps only when asked.
+    1. ADAPT TO THE USER: If they are in 11th grade, talk about Bachelors. If they have a BCA, talk about Masters.
+    2. PERSONALIZE: Acknowledge their background if provided. 
+    3. BE CONVERSATIONAL: Never output raw tables or JSON. Translate data into friendly advice.
+    4. BE CONCISE: Match the length of the user's message.
     """
 
     api_messages = [{"role": "system", "content": system_prompt}]
@@ -176,31 +175,47 @@ if prompt := st.chat_input("Ask Kompass anything..."):
 
     with st.chat_message("assistant"):
         try:
-            # STEP 1: Check if tools are needed (This call HAS tools)
+            # STEP 1: Check if tools are needed
             response = get_ai_response(messages=api_messages, tools=tools, stream=False)
             response_message = response.choices[0].message
             
             if response_message.tool_calls:
                 status_placeholder = st.empty()
                 status_placeholder.caption("🔍 Analyzing database...")
-                api_messages.append(response_message)
+                
+                # THE FIX: We don't append raw tool calls. We collect the text results.
+                tool_text_results = []
+                
                 for tool_call in response_message.tool_calls:
                     function_name = tool_call.function.name
                     function_args = json.loads(tool_call.function.arguments)
+                    
                     if function_name == "search_germany_programs":
-                        function_response = execute_search_germany_programs(function_args.get("keyword"), function_args.get("degree_level"), function_args.get("teaching_language"), function_args.get("is_public"))
+                        res = execute_search_germany_programs(function_args.get("keyword"), function_args.get("degree_level"), function_args.get("teaching_language"), function_args.get("is_public"))
                     elif function_name == "search_policies":
-                        function_response = execute_search_policies(function_args.get("query"))
+                        res = execute_search_policies(function_args.get("query"))
                     else:
-                        function_response = execute_web_search(function_args.get("query"))
-                    api_messages.append({"tool_call_id": tool_call.id, "role": "tool", "name": function_name, "content": json.dumps(function_response)})
+                        res = execute_web_search(function_args.get("query"))
+                        
+                    tool_text_results.append(f"Results for {function_name}: {json.dumps(res)}")
+                
                 status_placeholder.empty()
                 
-                # STEP 2: Stream the final answer (This call DOES NOT have tools)
-                stream = get_ai_response(messages=api_messages, stream=True)
+                # THE FIX: Create a CLEAN message history for the streaming call.
+                # We take the original messages, add the user prompt, and inject the tool results as plain text.
+                # This completely removes any "role: tool" or "tool_calls" history that confuses Groq.
+                clean_messages = [{"role": "system", "content": system_prompt}]
+                for m in st.session_state.messages[:-1]: # Exclude the latest prompt temporarily
+                    clean_messages.append({"role": m["role"], "content": m["content"]})
+                
+                clean_messages.append({"role": "user", "content": f"{prompt}\n\n[SYSTEM DATA FROM SEARCH]:\n" + "\n".join(tool_text_results) + "\n\nNow, provide your final answer based on this data."})
+                
+                # STEP 2: Stream with clean history and NO tools
+                stream = get_ai_response(messages=clean_messages, stream=True)
                 final_text = st.write_stream(stream_generator(stream))
+                
             else:
-                # If no tools needed, just stream the chat
+                # If no tools needed, just stream normally
                 stream = get_ai_response(messages=api_messages, stream=True)
                 final_text = st.write_stream(stream_generator(stream))
             
