@@ -3,6 +3,7 @@ import os
 import json
 import platform
 import re
+from datetime import datetime
 from openai import OpenAI
 from dotenv import load_dotenv
 from sqlalchemy import or_
@@ -40,21 +41,14 @@ FALLBACK_MODELS = [
 ]
 
 def get_ai_response(messages, tools=None, stream=False):
-    """Rotates through keys/models. If streaming, tools are ALWAYS stripped."""
     last_error = None
     for key in api_keys:
         for model in FALLBACK_MODELS:
             try:
                 client = OpenAI(api_key=key, base_url=base_url)
                 kwargs = {"model": model, "messages": messages}
-                
-                # CRITICAL: Only pass tools if we are NOT streaming.
-                if tools and not stream: 
-                    kwargs["tools"] = tools
-                
-                if stream: 
-                    kwargs["stream"] = True
-                
+                if tools and not stream: kwargs["tools"] = tools
+                if stream: kwargs["stream"] = True
                 return client.chat.completions.create(**kwargs)
             except Exception as e:
                 error_str = str(e).lower()
@@ -70,21 +64,35 @@ st.set_page_config(page_title="Kompass - Germany Study Advisor", page_icon="🧭
 st.title("🧭 Kompass - Germany Study Advisor")
 st.markdown("Your personal AI counselor for studying in Germany.")
 
+# --- VERIFIED FACTS (Hardcoded to prevent hallucination) ---
+VERIFIED_FACTS = """
+1. BLOCKED ACCOUNT: 11,208 EUR per year (934 EUR/month) as of 2024/2025 (Source: German Federal Foreign Office).
+2. EU BLUE CARD (2024): Regular threshold is 58,400 EUR/year. Shortage occupation threshold is 45,552 EUR/year (Source: Make it in Germany).
+3. PUBLIC VS PRIVATE: Public universities in Germany generally do NOT charge tuition fees for Bachelor's and consecutive Master's programs (except Baden-Württemberg for non-EU). They only charge a semester contribution (150-350 EUR). Private universities DO charge high tuition (10,000-20,000+ EUR).
+4. TUM FEES: TU Munich does NOT charge tuition for standard Master's programs (except specific executive/part-time ones). It charges a semester fee.
+5. 3-YEAR BACHELOR = 180 ECTS (60 ECTS per academic year).
+"""
+
 # --- BACKEND FUNCTIONS ---
 def execute_search_germany_programs(keyword, degree_level=None, teaching_language=None, is_public=None):
     db = SessionLocal()
     query = db.query(models.Program).join(models.University)
-    if keyword:
+    # Handle None/null values gracefully
+    if keyword and keyword != "null":
         search_term = "Electrical" if "ece" in keyword.lower() else keyword
         query = query.filter(or_(models.Program.title.ilike(f"%{search_term}%"), models.Program.field_of_study.ilike(f"%{search_term}%"), models.Program.title.ilike(f"%{keyword}%")))
-    if degree_level: query = query.filter(models.Program.degree_type.ilike(f"%{degree_level}%"))
-    if teaching_language: query = query.filter(models.Program.language.ilike(f"%{teaching_language}%"))
-    if is_public is not None: query = query.filter(models.University.institution_type.ilike("%public%"))
+    if degree_level and degree_level != "null": query = query.filter(models.Program.degree_type.ilike(f"%{degree_level}%"))
+    if teaching_language and teaching_language != "null": query = query.filter(models.Program.language.ilike(f"%{teaching_language}%"))
+    if is_public is not None and is_public != "null": 
+        query = query.filter(models.University.institution_type.ilike("%public%"))
     
     results = query.limit(5).all()
     formatted_results = [{"university": p.university.official_name if p.university else "Unknown", "program": p.title, "degree": p.degree_type, "tuition_eur": p.tuition_fee_eur} for p in results]
     db.close()
-    return formatted_results if formatted_results else "0 results found."
+    
+    if not formatted_results:
+        return "CRITICAL: 0 results found in the database. You MUST tell the user you couldn't find the program in your database. Do NOT invent a program."
+    return formatted_results
 
 def execute_search_policies(query):
     db = SessionLocal()
@@ -94,19 +102,87 @@ def execute_search_policies(query):
     except Exception as e:
         extracted_texts = [f"Policy search error: {str(e)}"]
     db.close()
-    return extracted_texts if extracted_texts else "No policies found matching that query."
+    if not extracted_texts:
+        return "No policies found matching that query in the database. Do NOT guess the rule."
+    return extracted_texts
 
 def execute_web_search(query):
     try:
         results = DDGS().text(query + " Germany study abroad", max_results=3)
-        return [f"Title: {r.get('title')}\nSource: {r.get('href')}\nSnippet: {r.get('body')}" for r in results] if results else "No internet results."
+        return [f"Title: {r.get('title')}\nSource: {r.get('href')}\nSnippet: {r.get('body')}" for r in results] if results else "No internet results found."
     except Exception as e: return f"Web search failed: {e}"
 
-# --- TOOLS DEFINITION ---
+def calculate_german_grade(cgpa, max_grade=10.0, min_pass=4.0):
+    """Calculates Modified Bavarian Formula deterministically."""
+    try:
+        cgpa = float(cgpa)
+        max_grade = float(max_grade)
+        min_pass = float(min_pass)
+        # 1 + 3 * (Nmax - Nd) / (Nmax - Nmin)
+        result = 1 + 3 * (max_grade - cgpa) / (max_grade - min_pass)
+        return f"The German grade equivalent is {round(result, 2)}."
+    except Exception as e:
+        return f"Math error: {e}"
+
+# --- TOOLS DEFINITION (FIXED SCHEMA) ---
 tools = [
-    {"type": "function", "function": {"name": "search_germany_programs", "description": "Search DB for German programs.", "parameters": {"type": "object", "properties": {"keyword": {"type": "string"}, "degree_level": {"type": "string"}, "teaching_language": {"type": "string"}, "is_public": {"type": "boolean"}}, "required": ["keyword"]}}},
-    {"type": "function", "function": {"name": "search_policies", "description": "Search DB for visa/APS/finance rules.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
-    {"type": "function", "function": {"name": "search_internet", "description": "Search live internet for recent news.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}
+    {
+        "type": "function", 
+        "function": {
+            "name": "search_germany_programs", 
+            "description": "Search DB for German programs.", 
+            "parameters": {
+                "type": "object", 
+                "properties": {
+                    "keyword": {"type": ["string", "null"]}, 
+                    "degree_level": {"type": ["string", "null"]}, 
+                    "teaching_language": {"type": ["string", "null"]}, 
+                    "is_public": {"type": ["boolean", "null"]}
+                }, 
+                "required": ["keyword"]
+            }
+        }
+    },
+    {
+        "type": "function", 
+        "function": {
+            "name": "search_policies", 
+            "description": "Search DB for visa/APS/finance rules.", 
+            "parameters": {
+                "type": "object", 
+                "properties": {"query": {"type": ["string", "null"]}}, 
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function", 
+        "function": {
+            "name": "search_internet", 
+            "description": "Search live internet for recent news.", 
+            "parameters": {
+                "type": "object", 
+                "properties": {"query": {"type": ["string", "null"]}}, 
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function", 
+        "function": {
+            "name": "calculate_german_grade", 
+            "description": "Use this tool to convert an Indian CGPA to a German grade. NEVER calculate this yourself.", 
+            "parameters": {
+                "type": "object", 
+                "properties": {
+                    "cgpa": {"type": "number", "description": "The student's CGPA"},
+                    "max_grade": {"type": "number", "description": "Max possible CGPA, default 10"},
+                    "min_pass": {"type": "number", "description": "Passing CGPA, default 4"}
+                }, 
+                "required": ["cgpa"]
+            }
+        }
+    }
 ]
 
 # --- STREAMING HELPER ---
@@ -115,7 +191,7 @@ def stream_generator(response):
         if chunk.choices and chunk.choices[0].delta.content:
             yield chunk.choices[0].delta.content
 
-# --- SIDEBAR: CV UPLOAD ---
+# --- SIDEBAR: CV UPLOAD (FIXED PROMPT) ---
 with st.sidebar:
     st.header("📄 Upload Your CV")
     uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
@@ -127,7 +203,10 @@ with st.sidebar:
                 doc = pymupdf.open(stream=uploaded_file.read(), filetype="pdf")
                 raw_text = "".join([page.get_text() for page in doc])
                 doc.close()
-                prompt = f"""Extract the CV information into JSON: {{"name": "string", "education": [{{"degree": "string", "institution": "string", "year": "string"}}], "skills": ["string"], "experience": [{{"role": "string", "company": "string", "description": "string"}}]}} \n CV TEXT: {raw_text[:5000]}"""
+                # STRICT CV PROMPT
+                prompt = f"""Extract the CV information into JSON. DO NOT summarize. Extract EVERY detail.
+                SCHEMA: {{"name": "string", "education": [{{"degree": "string", "institution": "string", "year": "string"}}], "skills": ["string"], "experience": [{{"role": "string", "company": "string", "duration": "string", "description": "string"}}]}} 
+                CV TEXT: {raw_text[:5000]}"""
                 response = get_ai_response(messages=[{"role": "user", "content": prompt}])
                 json_str = response.choices[0].message.content.replace("```json", "").replace("```", "").strip()
                 try:
@@ -157,16 +236,23 @@ if prompt := st.chat_input("Ask Kompass anything..."):
 
     profile_data = st.session_state.get("user_profile")
     profile_context = f"\n\n[STUDENT PROFILE ON FILE: \n{profile_data}]" if profile_data else "\n\n[No CV uploaded yet. DO NOT assume you know the user's name or background.]"
+    
+    today_date = datetime.now().strftime("%d %B %Y")
 
     system_prompt = f"""You are Kompass, an expert and friendly Germany study advisor. 
-    You are speaking directly to a student. Talk like a human mentor, not a search engine.
+    Today's date is: {today_date}. Use this for all math related to deadlines.
+    
     {profile_context}
     
-    RULES:
-    1. ADAPT TO THE USER: If they are in 11th grade, talk about Bachelors. If they have a BCA, talk about Masters.
-    2. PERSONALIZE: Acknowledge their background if provided. 
-    3. BE CONVERSATIONAL: Never output raw tables or JSON. Translate data into friendly advice.
-    4. BE CONCISE: Match the length of the user's message.
+    *** HARDCODED VERIFIED FACTS (Use these over any other memory) ***
+    {VERIFIED_FACTS}
+    
+    *** STRICT RULES ***
+    1. NEVER INVENT: If the search tool returns "0 results" or "not found", you MUST tell the user: "I couldn't find that in my database." DO NOT hallucinate universities, scholarships, or deadlines.
+    2. NEVER DO MATH: If asked to convert a grade, you MUST use the `calculate_german_grade` tool. Do not calculate it yourself.
+    3. NO HTML/LATEX: You are outputting Markdown. NEVER use `<br>`, `<p>`, or LaTeX like `$$`. Use standard Markdown tables and lists.
+    4. BE CONVERSATIONAL: Address the user's points one by one. If asked a list of questions, number them correctly (1, 2, 3...) matching the user's prompt.
+    5. SOURCES: If you use the internet or verified facts, provide the source link if available. Do not call something "official" unless it is from a retrieved source.
     """
 
     api_messages = [{"role": "system", "content": system_prompt}]
@@ -175,7 +261,7 @@ if prompt := st.chat_input("Ask Kompass anything..."):
 
     with st.chat_message("assistant"):
         try:
-            # STEP 1: Check if tools are needed
+            # STEP 1: Tool call
             response = get_ai_response(messages=api_messages, tools=tools, stream=False)
             response_message = response.choices[0].message
             
@@ -183,43 +269,47 @@ if prompt := st.chat_input("Ask Kompass anything..."):
                 status_placeholder = st.empty()
                 status_placeholder.caption("🔍 Analyzing database...")
                 
-                # THE FIX: We don't append raw tool calls. We collect the text results.
                 tool_text_results = []
                 
                 for tool_call in response_message.tool_calls:
                     function_name = tool_call.function.name
                     function_args = json.loads(tool_call.function.arguments)
                     
-                    if function_name == "search_germany_programs":
-                        res = execute_search_germany_programs(function_args.get("keyword"), function_args.get("degree_level"), function_args.get("teaching_language"), function_args.get("is_public"))
-                    elif function_name == "search_policies":
-                        res = execute_search_policies(function_args.get("query"))
-                    else:
-                        res = execute_web_search(function_args.get("query"))
+                    try:
+                        if function_name == "search_germany_programs":
+                            res = execute_search_germany_programs(function_args.get("keyword"), function_args.get("degree_level"), function_args.get("teaching_language"), function_args.get("is_public"))
+                        elif function_name == "search_policies":
+                            res = execute_search_policies(function_args.get("query"))
+                        elif function_name == "search_internet":
+                            res = execute_web_search(function_args.get("query"))
+                        elif function_name == "calculate_german_grade":
+                            res = calculate_german_grade(function_args.get("cgpa"), function_args.get("max_grade", 10), function_args.get("min_pass", 4))
+                    except Exception as e:
+                        res = f"Tool execution failed: {str(e)}"
                         
                     tool_text_results.append(f"Results for {function_name}: {json.dumps(res)}")
                 
                 status_placeholder.empty()
                 
-                # THE FIX: Create a CLEAN message history for the streaming call.
-                # We take the original messages, add the user prompt, and inject the tool results as plain text.
-                # This completely removes any "role: tool" or "tool_calls" history that confuses Groq.
+                # THE FIX: Flatten tool history to plain text to prevent Groq streaming crash
                 clean_messages = [{"role": "system", "content": system_prompt}]
-                for m in st.session_state.messages[:-1]: # Exclude the latest prompt temporarily
+                for m in st.session_state.messages[:-1]: 
                     clean_messages.append({"role": m["role"], "content": m["content"]})
                 
-                clean_messages.append({"role": "user", "content": f"{prompt}\n\n[SYSTEM DATA FROM SEARCH]:\n" + "\n".join(tool_text_results) + "\n\nNow, provide your final answer based on this data."})
+                clean_messages.append({"role": "user", "content": f"{prompt}\n\n[SYSTEM DATA FROM SEARCH]:\n" + "\n".join(tool_text_results) + "\n\nNow, provide your final answer based on this data. Follow all STRICT RULES."})
                 
-                # STEP 2: Stream with clean history and NO tools
                 stream = get_ai_response(messages=clean_messages, stream=True)
                 final_text = st.write_stream(stream_generator(stream))
                 
             else:
-                # If no tools needed, just stream normally
                 stream = get_ai_response(messages=api_messages, stream=True)
                 final_text = st.write_stream(stream_generator(stream))
             
-            final_text = re.sub(r'<[^>]+>', '', str(final_text)).strip()
+            # Cleanup any accidental HTML/LaTeX
+            final_text = str(final_text).replace("<br>", "\n").replace("<br/>", "\n").replace("<p>", "").replace("</p>", "\n")
+            final_text = re.sub(r'\$\$(.*?)\$\$', r'\1', final_text)
+            final_text = re.sub(r'<[^>]+>', '', final_text).strip()
+            
             st.session_state.messages.append({"role": "assistant", "content": final_text})
             
         except Exception as e:
