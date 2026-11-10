@@ -162,6 +162,12 @@ tools = [
     {"type": "function", "function": {"name": "calculate_german_grade", "description": "Convert CGPA to German grade.", "parameters": {"type": "object", "properties": {"cgpa": {"type": "number"}}, "required": ["cgpa"]}}}
 ]
 
+# --- MISSING FUNCTION RESTORED ---
+def stream_generator(response):
+    for chunk in response:
+        if chunk.choices and chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content
+
 # --- SIDEBAR: CV UPLOAD ---
 with st.sidebar:
     st.header("📄 Upload Your CV")
@@ -250,13 +256,11 @@ if prompt := st.chat_input("Ask Kompass anything..."):
                 for m in st.session_state.messages[:-1]: clean_messages.append({"role": m["role"], "content": m["content"]})
                 clean_messages.append({"role": "user", "content": f"{prompt}\n\n[SYSTEM DATA FROM SEARCH]:\n" + "\n".join(tool_text_results) + "\n\nNow, answer."})
                 
-                # THE ULTIMATE FIX: Try streaming, if it crashes, use non-streaming fallback.
                 try:
                     stream = get_ai_response(messages=clean_messages, stream=True)
                     final_text = st.write_stream(stream_generator(stream))
                 except Exception as stream_err:
                     if "tool choice" in str(stream_err).lower() or "called a tool" in str(stream_err).lower():
-                        # Silent fallback for Groq's hallucination bug
                         fallback_res = get_ai_response(messages=clean_messages, stream=False)
                         final_text = fallback_res.choices[0].message.content
                         st.markdown(final_text)
