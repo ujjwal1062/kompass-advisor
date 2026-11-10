@@ -40,14 +40,21 @@ FALLBACK_MODELS = [
 ]
 
 def get_ai_response(messages, tools=None, stream=False):
+    """Rotates through keys/models. Only passes tools if requested."""
     last_error = None
     for key in api_keys:
         for model in FALLBACK_MODELS:
             try:
                 client = OpenAI(api_key=key, base_url=base_url)
                 kwargs = {"model": model, "messages": messages}
-                if tools: kwargs["tools"] = tools
-                if stream: kwargs["stream"] = True
+                
+                # ✅ FIX: Only pass tools if we are NOT streaming.
+                # This prevents the model from hallucinating a tool call during the final text generation.
+                if tools and not stream: 
+                    kwargs["tools"] = tools
+                
+                if stream: 
+                    kwargs["stream"] = True
                 
                 return client.chat.completions.create(**kwargs)
             except Exception as e:
@@ -64,7 +71,7 @@ st.set_page_config(page_title="Kompass - Germany Study Advisor", page_icon="🧭
 st.title("🧭 Kompass - Germany Study Advisor")
 st.markdown("Your personal AI counselor for studying in Germany.")
 
-# --- BACKEND FUNCTIONS ---
+# --- BACKEND FUNCTIONS (Same as before) ---
 def execute_search_germany_programs(keyword, degree_level=None, teaching_language=None, is_public=None):
     db = SessionLocal()
     query = db.query(models.Program).join(models.University)
@@ -83,9 +90,7 @@ def execute_search_germany_programs(keyword, degree_level=None, teaching_languag
 def execute_search_policies(query):
     db = SessionLocal()
     try:
-        results = db.query(models.PolicyDocument).filter(
-            models.PolicyDocument.chunk_text.ilike(f"%{query}%")
-        ).limit(3).all()
+        results = db.query(models.PolicyDocument).filter(models.PolicyDocument.chunk_text.ilike(f"%{query}%")).limit(3).all()
         extracted_texts = [r.chunk_text for r in results] if results else []
     except Exception as e:
         extracted_texts = [f"Policy search error: {str(e)}"]
@@ -115,36 +120,26 @@ def stream_generator(response):
 with st.sidebar:
     st.header("📄 Upload Your CV")
     uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
-    
-    # Initialize the session state for this specific user
     if "user_profile" not in st.session_state:
         st.session_state.user_profile = None
-
     if uploaded_file is not None:
         if st.button("Process CV"):
             with st.spinner("Structuring CV..."):
                 doc = pymupdf.open(stream=uploaded_file.read(), filetype="pdf")
                 raw_text = "".join([page.get_text() for page in doc])
                 doc.close()
-                
                 prompt = f"""Extract the CV information into JSON: {{"name": "string", "education": [{{"degree": "string", "institution": "string", "year": "string"}}], "skills": ["string"], "experience": [{{"role": "string", "company": "string", "description": "string"}}]}} \n CV TEXT: {raw_text[:5000]}"""
                 response = get_ai_response(messages=[{"role": "user", "content": prompt}])
                 json_str = response.choices[0].message.content.replace("```json", "").replace("```", "").strip()
-                
                 try:
                     profile_data = json.loads(json_str)
                     name = profile_data.get("name", "Unknown")
-                    
-                    # Save to Database (optional, for your records)
                     db = SessionLocal()
                     db.add(models.StudentProfile(name=name, profile_json=json_str))
                     db.commit()
                     db.close()
-                    
-                    # Save to THIS user's session memory
                     st.session_state.user_profile = json_str
                     st.success(f"✅ Profile loaded for {name}!")
-                    
                 except Exception as e:
                     st.error(f"Error: {e}")
 
@@ -161,13 +156,8 @@ if prompt := st.chat_input("Ask Kompass anything..."):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Check IF THIS SPECIFIC USER uploaded a CV in this session
     profile_data = st.session_state.get("user_profile")
-    
-    if profile_data:
-        profile_context = f"\n\n[STUDENT PROFILE ON FILE: \n{profile_data}]"
-    else:
-        profile_context = "\n\n[No CV uploaded yet. DO NOT assume you know the user's name or background. Ask them to introduce themselves.]"
+    profile_context = f"\n\n[STUDENT PROFILE ON FILE: \n{profile_data}]" if profile_data else "\n\n[No CV uploaded yet. DO NOT assume you know the user's name or background. Ask them to introduce themselves.]"
 
     system_prompt = f"""You are Kompass, an expert and friendly Germany study advisor. 
     You are speaking directly to a student. Talk like a human mentor, not a search engine.
@@ -181,39 +171,36 @@ if prompt := st.chat_input("Ask Kompass anything..."):
     """
 
     api_messages = [{"role": "system", "content": system_prompt}]
-    
     for msg in st.session_state.messages:
         api_messages.append({"role": msg["role"], "content": msg["content"]})
 
     with st.chat_message("assistant"):
         try:
-            response = get_ai_response(messages=api_messages, tools=tools)
+            # STEP 1: Check if tools are needed (This call HAS tools)
+            response = get_ai_response(messages=api_messages, tools=tools, stream=False)
             response_message = response.choices[0].message
             
             if response_message.tool_calls:
                 status_placeholder = st.empty()
                 status_placeholder.caption("🔍 Analyzing database...")
-                
                 api_messages.append(response_message)
                 for tool_call in response_message.tool_calls:
                     function_name = tool_call.function.name
                     function_args = json.loads(tool_call.function.arguments)
-                    
                     if function_name == "search_germany_programs":
                         function_response = execute_search_germany_programs(function_args.get("keyword"), function_args.get("degree_level"), function_args.get("teaching_language"), function_args.get("is_public"))
                     elif function_name == "search_policies":
                         function_response = execute_search_policies(function_args.get("query"))
                     else:
                         function_response = execute_web_search(function_args.get("query"))
-                        
                     api_messages.append({"tool_call_id": tool_call.id, "role": "tool", "name": function_name, "content": json.dumps(function_response)})
-                
                 status_placeholder.empty()
                 
+                # STEP 2: Stream the final answer (This call DOES NOT have tools)
                 stream = get_ai_response(messages=api_messages, stream=True)
                 final_text = st.write_stream(stream_generator(stream))
-                
             else:
+                # If no tools needed, just stream the chat
                 stream = get_ai_response(messages=api_messages, stream=True)
                 final_text = st.write_stream(stream_generator(stream))
             
