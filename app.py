@@ -45,7 +45,8 @@ def get_ai_response(messages, tools=None, stream=False):
             except Exception as e:
                 error_str = str(e).lower()
                 last_error = e
-                if any(err in error_str for err in ["429", "rate limit", "404", "not found", "tool choice", "called a tool"]):
+                # Added 413 (Request too large) to the fallback list so it instantly switches models
+                if any(err in error_str for err in ["429", "rate limit", "404", "not found", "tool choice", "called a tool", "413", "request too large"]):
                     continue 
                 else:
                     raise e 
@@ -87,7 +88,8 @@ def execute_search_germany_programs(keyword, degree_level=None, teaching_languag
         db.close()
         return f"Found exactly {count} programs matching those criteria in the database."
 
-    results = query.limit(10).all()
+    # Reduced limit from 10 to 5 to save tokens
+    results = query.limit(5).all()
     formatted = [{"university": p.university.official_name if p.university else "Unknown", "program": p.title, "degree": p.degree_type, "tuition": p.tuition_fee_eur} for p in results]
     db.close()
     return formatted if formatted else "0 results found. Use search_internet."
@@ -101,7 +103,7 @@ def execute_match_scholarships(nationality="India", degree_level="Master"):
     if degree_level:
         query = query.filter(models.PolicyDocument.chunk_text.ilike(f"%{degree_level}%"))
         
-    results = query.limit(5).all()
+    results = query.limit(3).all() # Reduced to 3 to save tokens
     extracted_texts = [r.chunk_text for r in results] if results else []
     db.close()
     
@@ -117,7 +119,7 @@ def execute_check_anabin(university_name):
         if len(word) > 3: 
             search_conditions.append(models.IndianUniversity.name.ilike(f"%{word}%"))
             
-    results = db.query(models.IndianUniversity).filter(or_(*search_conditions)).limit(3).all()
+    results = db.query(models.IndianUniversity).filter(or_(*search_conditions)).limit(2).all()
     formatted = [{"university": r.name, "status": r.h_plus_status} for r in results]
     db.close()
     
@@ -133,7 +135,7 @@ def execute_check_anabin(university_name):
 def execute_search_knowledge_base(query):
     db = SessionLocal()
     try:
-        results = db.query(models.PolicyDocument).filter(models.PolicyDocument.chunk_text.ilike(f"%{query}%")).limit(4).all()
+        results = db.query(models.PolicyDocument).filter(models.PolicyDocument.chunk_text.ilike(f"%{query}%")).limit(2).all() # Reduced to 2
         extracted_texts = [r.chunk_text for r in results] if results else []
     except Exception as e:
         extracted_texts = [f"Error: {str(e)}"]
@@ -142,7 +144,7 @@ def execute_search_knowledge_base(query):
 
 def execute_web_search(query):
     try:
-        results = DDGS().text(query + " Anabin Germany recognition", max_results=4)
+        results = DDGS().text(query + " Anabin Germany recognition", max_results=3) # Reduced to 3
         return [f"Title: {r.get('title')}\nSource: {r.get('href')}\nSnippet: {r.get('body')}" for r in results] if results else "No internet results found."
     except Exception as e: return f"Web search failed: {e}"
 
@@ -162,7 +164,6 @@ tools = [
     {"type": "function", "function": {"name": "calculate_german_grade", "description": "Convert CGPA to German grade.", "parameters": {"type": "object", "properties": {"cgpa": {"type": "number"}}, "required": ["cgpa"]}}}
 ]
 
-# --- MISSING FUNCTION RESTORED ---
 def stream_generator(response):
     for chunk in response:
         if chunk.choices and chunk.choices[0].delta.content:
@@ -179,7 +180,7 @@ with st.sidebar:
                 doc = pymupdf.open(stream=uploaded_file.read(), filetype="pdf")
                 raw_text = "".join([page.get_text() for page in doc])
                 doc.close()
-                prompt = f"""Extract CV info to JSON. SCHEMA: {{"name": "string", "education": [{{"degree": "string", "institution": "string", "year": "string"}}], "skills": ["string"], "experience": [{{"role": "string", "company": "string", "duration": "string", "description": "string"}}]}} \n CV TEXT: {raw_text[:5000]}"""
+                prompt = f"""Extract CV info to JSON. SCHEMA: {{"name": "string", "education": [{{"degree": "string", "institution": "string", "year": "string"}}], "skills": ["string"], "experience": [{{"role": "string", "company": "string", "duration": "string", "description": "string"}}]}} \n CV TEXT: {raw_text[:3000]}""" # Truncated CV text to save tokens
                 response = get_ai_response(messages=[{"role": "user", "content": prompt}])
                 json_str = response.choices[0].message.content.replace("```json", "").replace("```", "").strip()
                 try:
@@ -225,11 +226,15 @@ if prompt := st.chat_input("Ask Kompass anything..."):
     """
 
     api_messages = [{"role": "system", "content": system_prompt}]
-    for msg in st.session_state.messages: api_messages.append({"role": msg["role"], "content": msg["content"]})
+    
+    # --- CONTEXT TRIMMING FIX ---
+    # Only keep the last 6 messages from the chat history to prevent TPM limit
+    recent_messages = st.session_state.messages[-6:] if len(st.session_state.messages) > 6 else st.session_state.messages
+    for msg in recent_messages: 
+        api_messages.append({"role": msg["role"], "content": msg["content"]})
 
     with st.chat_message("assistant"):
         try:
-            # STEP 1: Check for tool calls
             response = get_ai_response(messages=api_messages, tools=tools, stream=False)
             response_message = response.choices[0].message
             
@@ -253,7 +258,7 @@ if prompt := st.chat_input("Ask Kompass anything..."):
                 
                 status_placeholder.empty()
                 clean_messages = [{"role": "system", "content": system_prompt}]
-                for m in st.session_state.messages[:-1]: clean_messages.append({"role": m["role"], "content": m["content"]})
+                for m in recent_messages[:-1]: clean_messages.append({"role": m["role"], "content": m["content"]})
                 clean_messages.append({"role": "user", "content": f"{prompt}\n\n[SYSTEM DATA FROM SEARCH]:\n" + "\n".join(tool_text_results) + "\n\nNow, answer."})
                 
                 try:
