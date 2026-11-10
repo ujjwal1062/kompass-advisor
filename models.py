@@ -59,3 +59,15 @@ class StudentProfile(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)
     profile_json = Column(Text, nullable=False)
+
+# ==========================================
+# 4. INDIAN UNIVERSITY TABLE (Anabin Data)
+# ==========================================
+class IndianUniversity(Base):
+    __tablename__ = "indian_universities"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True, nullable=False)
+    h_plus_status = Column(String) 
+    city = Column(String)
+    state = Column(String)
