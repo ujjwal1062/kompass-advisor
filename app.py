@@ -88,6 +88,31 @@ def execute_search_germany_programs(keyword, degree_level=None, teaching_languag
     db.close()
     return formatted if formatted else "0 results found. Use search_internet."
 
+def execute_match_scholarships(nationality="India", degree_level="Master"):
+    """Dedicated tool to filter scholarships by nationality and degree level."""
+    db = SessionLocal()
+    query = db.query(models.PolicyDocument).filter(
+        models.PolicyDocument.topic == "Scholarships",
+        models.PolicyDocument.chunk_text.ilike(f"%{nationality}%")
+    )
+    if degree_level:
+        query = query.filter(models.PolicyDocument.chunk_text.ilike(f"%{degree_level}%"))
+        
+    results = query.limit(5).all()
+    extracted_texts = [r.chunk_text for r in results] if results else []
+    db.close()
+    
+    if not extracted_texts:
+        return f"No scholarships found for {nationality} students at the {degree_level} level in the database."
+    return extracted_texts
+
+def execute_check_anabin(university_name):
+    db = SessionLocal()
+    results = db.query(models.IndianUniversity).filter(models.IndianUniversity.name.ilike(f"%{university_name}%")).limit(3).all()
+    formatted = [{"university": r.name, "status": r.h_plus_status, "city": r.city} for r in results]
+    db.close()
+    return formatted if formatted else "0 results found. Could not find this Indian university in the Anabin registry."
+
 def execute_search_knowledge_base(query):
     db = SessionLocal()
     try:
@@ -97,13 +122,6 @@ def execute_search_knowledge_base(query):
         extracted_texts = [f"Error: {str(e)}"]
     db.close()
     return extracted_texts if extracted_texts else "0 results found. Use search_internet."
-
-def execute_check_anabin(university_name):
-    db = SessionLocal()
-    results = db.query(models.IndianUniversity).filter(models.IndianUniversity.name.ilike(f"%{university_name}%")).limit(3).all()
-    formatted = [{"university": r.name, "status": r.h_plus_status, "city": r.city} for r in results]
-    db.close()
-    return formatted if formatted else "0 results found. Could not find this Indian university in the Anabin registry."
 
 def execute_web_search(query):
     try:
@@ -120,8 +138,9 @@ def calculate_german_grade(cgpa, max_grade=10.0, min_pass=4.0):
 # --- TOOLS DEFINITION ---
 tools = [
     {"type": "function", "function": {"name": "search_germany_programs", "description": "Search DB for unis/programs.", "parameters": {"type": "object", "properties": {"keyword": {"type": ["string", "null"]}, "degree_level": {"type": ["string", "null"]}, "teaching_language": {"type": ["string", "null"]}, "is_public": {"type": ["boolean", "null"]}}, "required": ["keyword"]}}},
-    {"type": "function", "function": {"name": "search_knowledge_base", "description": "Search local DB for scholarships, visas, APS, finance, AND industry/careers.", "parameters": {"type": "object", "properties": {"query": {"type": ["string", "null"]}}, "required": ["query"]}}},
-    {"type": "function", "function": {"name": "check_anabin_status", "description": "Check the H+ recognition status of an Indian university in the Anabin database.", "parameters": {"type": "object", "properties": {"university_name": {"type": "string"}}, "required": ["university_name"]}}},
+    {"type": "function", "function": {"name": "match_scholarships", "description": "Find scholarships filtered by nationality and degree level.", "parameters": {"type": "object", "properties": {"nationality": {"type": ["string", "null"]}, "degree_level": {"type": ["string", "null"]}}, "required": []}}},
+    {"type": "function", "function": {"name": "check_anabin_status", "description": "Check the H+ recognition status of an Indian university.", "parameters": {"type": "object", "properties": {"university_name": {"type": "string"}}, "required": ["university_name"]}}},
+    {"type": "function", "function": {"name": "search_knowledge_base", "description": "Search local DB for visas, APS, finance, AND industry/careers.", "parameters": {"type": "object", "properties": {"query": {"type": ["string", "null"]}}, "required": ["query"]}}},
     {"type": "function", "function": {"name": "search_internet", "description": "Use ONLY if the local DB returns 0 results.", "parameters": {"type": "object", "properties": {"query": {"type": ["string", "null"]}}, "required": ["query"]}}},
     {"type": "function", "function": {"name": "calculate_german_grade", "description": "Convert CGPA to German grade.", "parameters": {"type": "object", "properties": {"cgpa": {"type": "number"}}, "required": ["cgpa"]}}}
 ]
@@ -178,11 +197,12 @@ if prompt := st.chat_input("Ask Kompass anything..."):
     {VERIFIED_FACTS}
     
     *** RULES ***
-    1. ANABIN: If the user asks if their Indian university is recognized, you MUST use the `check_anabin_status` tool. DO NOT guess the H+ status.
-    2. INDUSTRY/CAREERS: If asked about jobs, companies, or which state is best for their field, use the `search_knowledge_base` tool (it contains industry data).
-    3. LOCAL DATA FIRST. Only use `search_internet` if the local DB says "0 results found".
-    4. NO HTML/LATEX. Use pure Markdown.
-    5. Be a mentor, talk like a human.
+    1. SCHOLARSHIPS: If the user asks about scholarships, you MUST use the `match_scholarships` tool. Analyze the returned criteria (CGPA, deadlines, etc.) against the student's profile to see if they are eligible.
+    2. ANABIN: If the user asks if their Indian university is recognized, you MUST use the `check_anabin_status` tool. DO NOT guess.
+    3. INDUSTRY/CAREERS: Use `search_knowledge_base` for jobs/companies.
+    4. LOCAL DATA FIRST. Only use `search_internet` if the local DB returns "0 results found".
+    5. NO HTML/LATEX. Use pure Markdown.
+    6. Be a mentor, talk like a human.
     """
 
     api_messages = [{"role": "system", "content": system_prompt}]
@@ -203,8 +223,9 @@ if prompt := st.chat_input("Ask Kompass anything..."):
                     args = json.loads(tool_call.function.arguments)
                     try:
                         if fn == "search_germany_programs": res = execute_search_germany_programs(args.get("keyword"), args.get("degree_level"), args.get("teaching_language"), args.get("is_public"))
-                        elif fn == "search_knowledge_base": res = execute_search_knowledge_base(args.get("query"))
+                        elif fn == "match_scholarships": res = execute_match_scholarships(args.get("nationality", "India"), args.get("degree_level", "Master"))
                         elif fn == "check_anabin_status": res = execute_check_anabin(args.get("university_name"))
+                        elif fn == "search_knowledge_base": res = execute_search_knowledge_base(args.get("query"))
                         elif fn == "search_internet": res = execute_web_search(args.get("query"))
                         elif fn == "calculate_german_grade": res = calculate_german_grade(args.get("cgpa"))
                     except Exception as e: res = f"Error: {str(e)}"
