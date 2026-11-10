@@ -39,13 +39,15 @@ def get_ai_response(messages, tools=None, stream=False):
             try:
                 client = OpenAI(api_key=key, base_url=base_url)
                 kwargs = {"model": model, "messages": messages}
+                # Explicitly set max_tokens to prevent mid-sentence cutoffs
+                kwargs["max_tokens"] = 2048 
+                
                 if tools and not stream: kwargs["tools"] = tools
                 if stream: kwargs["stream"] = True
                 return client.chat.completions.create(**kwargs)
             except Exception as e:
                 error_str = str(e).lower()
                 last_error = e
-                # Added 413 (Request too large) to the fallback list so it instantly switches models
                 if any(err in error_str for err in ["429", "rate limit", "404", "not found", "tool choice", "called a tool", "413", "request too large"]):
                     continue 
                 else:
@@ -88,8 +90,8 @@ def execute_search_germany_programs(keyword, degree_level=None, teaching_languag
         db.close()
         return f"Found exactly {count} programs matching those criteria in the database."
 
-    # Reduced limit from 10 to 5 to save tokens
-    results = query.limit(5).all()
+    # TOKEN SAVING: Limit to 3 results
+    results = query.limit(3).all()
     formatted = [{"university": p.university.official_name if p.university else "Unknown", "program": p.title, "degree": p.degree_type, "tuition": p.tuition_fee_eur} for p in results]
     db.close()
     return formatted if formatted else "0 results found. Use search_internet."
@@ -103,8 +105,10 @@ def execute_match_scholarships(nationality="India", degree_level="Master"):
     if degree_level:
         query = query.filter(models.PolicyDocument.chunk_text.ilike(f"%{degree_level}%"))
         
-    results = query.limit(3).all() # Reduced to 3 to save tokens
-    extracted_texts = [r.chunk_text for r in results] if results else []
+    # TOKEN SAVING: Limit to 2 results
+    results = query.limit(2).all()
+    # TOKEN SAVING: Truncate each chunk to 300 characters
+    extracted_texts = [r.chunk_text[:300] for r in results] if results else []
     db.close()
     
     if not extracted_texts:
@@ -135,8 +139,9 @@ def execute_check_anabin(university_name):
 def execute_search_knowledge_base(query):
     db = SessionLocal()
     try:
-        results = db.query(models.PolicyDocument).filter(models.PolicyDocument.chunk_text.ilike(f"%{query}%")).limit(2).all() # Reduced to 2
-        extracted_texts = [r.chunk_text for r in results] if results else []
+        results = db.query(models.PolicyDocument).filter(models.PolicyDocument.chunk_text.ilike(f"%{query}%")).limit(2).all()
+        # TOKEN SAVING: Truncate to 300 chars
+        extracted_texts = [r.chunk_text[:300] for r in results] if results else []
     except Exception as e:
         extracted_texts = [f"Error: {str(e)}"]
     db.close()
@@ -144,8 +149,8 @@ def execute_search_knowledge_base(query):
 
 def execute_web_search(query):
     try:
-        results = DDGS().text(query + " Anabin Germany recognition", max_results=3) # Reduced to 3
-        return [f"Title: {r.get('title')}\nSource: {r.get('href')}\nSnippet: {r.get('body')}" for r in results] if results else "No internet results found."
+        results = DDGS().text(query + " Anabin Germany recognition", max_results=2) # Limit to 2
+        return [f"Title: {r.get('title')}\nSource: {r.get('href')}\nSnippet: {r.get('body')[:200]}" for r in results] if results else "No internet results found."
     except Exception as e: return f"Web search failed: {e}"
 
 def calculate_german_grade(cgpa, max_grade=10.0, min_pass=4.0):
@@ -180,7 +185,7 @@ with st.sidebar:
                 doc = pymupdf.open(stream=uploaded_file.read(), filetype="pdf")
                 raw_text = "".join([page.get_text() for page in doc])
                 doc.close()
-                prompt = f"""Extract CV info to JSON. SCHEMA: {{"name": "string", "education": [{{"degree": "string", "institution": "string", "year": "string"}}], "skills": ["string"], "experience": [{{"role": "string", "company": "string", "duration": "string", "description": "string"}}]}} \n CV TEXT: {raw_text[:3000]}""" # Truncated CV text to save tokens
+                prompt = f"""Extract CV info to JSON. SCHEMA: {{"name": "string", "education": [{{"degree": "string", "institution": "string", "year": "string"}}], "skills": ["string"], "experience": [{{"role": "string", "company": "string", "duration": "string", "description": "string"}}]}} \n CV TEXT: {raw_text[:3000]}"""
                 response = get_ai_response(messages=[{"role": "user", "content": prompt}])
                 json_str = response.choices[0].message.content.replace("```json", "").replace("```", "").strip()
                 try:
@@ -216,20 +221,18 @@ if prompt := st.chat_input("Ask Kompass anything..."):
     {VERIFIED_FACTS}
     
     *** RULES ***
-    1. ANABIN: Use `check_anabin_status`. 
-       - CRITICAL RULE: If the tool returns "0 results found" OR it returns a status of "not_checked", you must IMMEDIATELY use `search_internet` to check the live Anabin portal. Do not tell the user it is unrecognized until you have checked the internet.
-    2. SCHOLARSHIPS: Use `match_scholarships` if asked about scholarships.
-    3. INDUSTRY/CAREERS: Use `search_knowledge_base` for jobs/companies.
-    4. LOCAL DATA FIRST. Only use `search_internet` if the local DB fails.
+    1. ANABIN: Use `check_anabin_status`. If the tool says "0 results" or "not_checked", IMMEDIATELY use `search_internet`.
+    2. SCHOLARSHIPS: Use `match_scholarships`.
+    3. INDUSTRY: Use `search_knowledge_base`.
+    4. FORMATTING: Be extremely concise. NEVER generate massive Markdown tables for roadmaps or long lists. Use bullet points instead. This prevents the response from being cut off due to token limits.
     5. NO HTML/LATEX. Use pure Markdown.
     6. Be a mentor, talk like a human.
     """
 
     api_messages = [{"role": "system", "content": system_prompt}]
     
-    # --- CONTEXT TRIMMING FIX ---
-    # Only keep the last 6 messages from the chat history to prevent TPM limit
-    recent_messages = st.session_state.messages[-6:] if len(st.session_state.messages) > 6 else st.session_state.messages
+    # TOKEN SAVING: Only keep the last 4 messages to prevent TPM (413) errors
+    recent_messages = st.session_state.messages[-4:] if len(st.session_state.messages) > 4 else st.session_state.messages
     for msg in recent_messages: 
         api_messages.append({"role": msg["role"], "content": msg["content"]})
 
@@ -259,7 +262,7 @@ if prompt := st.chat_input("Ask Kompass anything..."):
                 status_placeholder.empty()
                 clean_messages = [{"role": "system", "content": system_prompt}]
                 for m in recent_messages[:-1]: clean_messages.append({"role": m["role"], "content": m["content"]})
-                clean_messages.append({"role": "user", "content": f"{prompt}\n\n[SYSTEM DATA FROM SEARCH]:\n" + "\n".join(tool_text_results) + "\n\nNow, answer."})
+                clean_messages.append({"role": "user", "content": f"{prompt}\n\n[SYSTEM DATA FROM SEARCH]:\n" + "\n".join(tool_text_results) + "\n\nNow, answer concisely."})
                 
                 try:
                     stream = get_ai_response(messages=clean_messages, stream=True)
